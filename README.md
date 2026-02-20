@@ -1,4 +1,4 @@
-﻿## PPO Agent for 2D Molecular Dynamics (CV1/CV2) + Analysis Pipeline
+## PPO Agent for 2D Molecular Dynamics (CV1/CV2) + Analysis Pipeline
 ## Project Overview
 This repository trains a PPO reinforcement learning agent to bias a molecular dynamics (MD) system using two collective variables (CV1 and CV2). The core training loop uses OpenMM to generate trajectories and a PPO policy to apply Gaussian biasing in CV space. The analysis suite then summarizes trajectories, computes free energy surfaces (FES), runs PCA, and provides a gap analysis toolkit for sparse regions and transition pathways.
 
@@ -25,10 +25,38 @@ Key capabilities:
 - `analysis/pca_md.py` performs PCA on DCD trajectories (streamed with MDAnalysis).
 - `analysis/pca_analysis.py` provides PCA on generic `.npy` arrays (frames x features).
 
+### Gap Analysis
+In this project, a "gap" means a sparsely sampled or underrepresented region in CV1/CV2 space relative to the rest of the trajectory data. Gaps usually appear as low-count or low-probability bins in the 2D density, or as high-FES regions that were rarely visited. These gaps flag regions where the policy has limited coverage, where barriers may exist, or where transition pathways are under-resolved.
+
+<center><img src="results_PPO/full_trajectories/progressive_traj_ep_0002_cv1_cv2_2d.png" width="50%" height="50%"> </center>
+
+#### Density Approach (CV Density / FES Gaps)
+**Logic**: build a 2D histogram over CV1/CV2, convert to probability, and optionally to FES; then mark bins that fall below a count/probability threshold or above an FES threshold.  
+
+**Key variables**: binning (`bins`, `bin_width`, `bin_strategy`), physical scaling (`temperature`, `units`, `kT`), numerical stability (`pseudocount`, `epsilon`), and gap criteria (`min_count`, `gap_max_count`, `gap_max_prob`, `gap_min_fes`, `gap_percentile`, `gap_from`).  
+
+**Why it helps and why applied**: density-based gaps are the most direct measure of sampling coverage. They highlight where trajectories have not spent time, and when overlaid with paths or MFEP, they show whether transitions are missing or poorly sampled. This approach is applied because it is robust, interpretable, and aligns with standard MD/FES diagnostics.
+
+#### Speed Spikes Approach (CV Derivative Hotspots)
+**Logic**: compute finite-difference derivatives of CV1 and CV2 versus time and analyze the speed magnitude $$\sqrt{\left(\frac{dCV1}{dt}\right)^{2} + \left(\frac{dCV2}{dt}\right)^{2}}.$$ Identify the top-N spikes and/or threshold-based spike regions on a CV grid.
+
+**Key variables**: time handling (`time` array or `dt`), spike selection (`top_n`, `spike_percentile`, `spike_min_speed`), and spike binning (`spike_bins`, `spike_bin_width`, `spike_min_count`).
+
+**Why it helps and why applied**: sharp speed spikes often correspond to barrier crossings, rapid rearrangements, or rare transition events that can be washed out in density plots. This approach helps isolate dynamic “hot corridors” even if they are low occupancy, which makes it complementary to density-based gaps.
+
+#### Transition-Path Density Overlays (Basin-to-Basin Paths)
+**Logic**: define basins (manual rectangles/polygons or automatic clustering), extract segments that transition between basins, then compute a density map of those transition segments and overlay it on the FES or CV density.  
+
+**Key variables**: basin definition (`basin_method`, `basin_rect`, `basin_poly`), clustering (`cluster_method`, `dbscan_eps`, `dbscan_min_samples`, `gmm_components`, `gmm_cov`, `gmm_prob_threshold`, `cluster_scale`), transition extraction (`transition_mode`, `boundary_pad`), and density parameters (`bins`, `bin_width`, `trans_min_count`, `trans_alpha`).  
+
+**Why it helps and why applied**: transition-path overlays focus on how the system moves between metastable basins rather than where it sits. This highlights preferred pathways, reveals under-sampled corridors, and helps diagnose whether the policy is finding the expected routes or getting stuck in off-path regions.
+
 ### Gap Analysis Toolkit
-- `analysis/cv2d_density.py` highlights sparse regions (gap masks) and overlays trajectories.
-- `analysis/cv2d_speed.py` computes CV derivatives and speed spike regions.
-- `analysis/cv2d_transitions.py` identifies basins, extracts transitions, and overlays density on FES.
+- `analysis/cv2d_density.py`: density/FES grids, gap masks, and overlay plots (trajectories, MFEP, annotated jumps/traps).
+- `analysis/cv2d_speed.py`: derivative-based speed maps and spike reporting (top-N and thresholded regions).
+- `analysis/cv2d_transitions.py`: basin discovery, transition segment extraction, and transition-path density overlays.
+- Typical inputs: `analysis_runs/<timestamp>/data/cv1.npy`, `cv2.npy`, optional `time.npy`/`episode.npy`.
+- Typical outputs: gap masks and FES overlays, spike tables/maps, and transition density plots saved under `results_PPO/analysis_runs/<timestamp>/figs/analysis/`.
 
 ## Repository Structure
 ### Directory Layout
