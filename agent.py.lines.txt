@@ -1,0 +1,244 @@
+   1: # agent.py — PPO Agent (final)
+   2: import numpy as np
+   3: import random
+   4: import torch
+   5: import torch.nn as nn
+   6: import torch.nn.functional as F
+   7: import torch.optim as optim
+   8: import config_gaussian as config
+   9: 
+  10: class RunningNorm:
+  11:     def __init__(self, eps=1e-8):
+  12:         self.mean = None; self.var = None; self.count = eps
+  13:     def update(self, x):
+  14:         if isinstance(x, torch.Tensor): x = x.detach().cpu().numpy()
+  15:         x = np.asarray(x, dtype=np.float64)
+  16:         if x.ndim == 1: x = x[None, :]
+  17:         b_mean = x.mean(axis=0); b_var = x.var(axis=0); b_cnt = x.shape[0]
+  18:         if self.mean is None:
+  19:             self.mean, self.var, self.count = b_mean, np.maximum(b_var, 1e-8), b_cnt
+  20:         else:
+  21:             delta = b_mean - self.mean; tot = self.count + b_cnt
+  22:             new_mean = self.mean + delta * b_cnt / tot
+  23:             m_a = self.var * self.count; m_b = b_var * b_cnt
+  24:             M2 = m_a + m_b + delta**2 * self.count * b_cnt / tot
+  25:             new_var = np.maximum(M2 / tot, 1e-8)
+  26:             self.mean, self.var, self.count = new_mean, new_var, tot
+  27:     def normalize(self, x):
+  28:         if self.mean is None or self.var is None: return x
+  29:         if isinstance(x, torch.Tensor):
+  30:             mean = torch.tensor(self.mean, dtype=x.dtype, device=x.device)
+  31:             std  = torch.tensor(np.sqrt(self.var)+1e-8, dtype=x.dtype, device=x.device)
+  32:             return (x - mean) / std
+  33:         x = np.asarray(x, dtype=np.float32)
+  34:         return (x - self.mean) / (np.sqrt(self.var) + 1e-8)
+  35:     def state_dict(self):
+  36:         return {'mean': None if self.mean is None else self.mean.tolist(),
+  37:                 'var': None if self.var is None else self.var.tolist(),
+  38:                 'count': float(self.count)}
+  39:     def load_state_dict(self, d):
+  40:         if not d: return
+  41:         self.mean  = None if d.get('mean') is None else np.asarray(d['mean'], dtype=np.float64)
+  42:         self.var   = None if d.get('var')  is None else np.asarray(d['var'], dtype=np.float64)
+  43:         self.count = float(d.get('count', 1e-8))
+  44: 
+  45: class Actor(nn.Module):
+  46:     def __init__(self, state_size, action_size, seed, fc1=256, fc2=128, fc3=64):
+  47:         super().__init__(); torch.manual_seed(seed)
+  48:         self.fc1 = nn.Linear(state_size, fc1); self.fc2 = nn.Linear(fc1, fc2)
+  49:         self.fc3 = nn.Linear(fc2, fc3); self.fc4 = nn.Linear(fc3, action_size)
+  50:     def forward_logits(self, state):
+  51:         x = F.relu(self.fc1(state)); x = F.relu(self.fc2(x)); x = F.relu(self.fc3(x))
+  52:         return torch.clamp(self.fc4(x), -20, 20)
+  53:     def forward(self, state):  # not used directly
+  54:         return F.softmax(self.forward_logits(state), dim=-1)
+  55: 
+  56: class Critic(nn.Module):
+  57:     def __init__(self, state_size, seed, fc1=256, fc2=128, fc3=64):
+  58:         super().__init__(); torch.manual_seed(seed)
+  59:         self.fc1 = nn.Linear(state_size, fc1); self.fc2 = nn.Linear(fc1, fc2)
+  60:         self.fc3 = nn.Linear(fc2, fc3); self.fc4 = nn.Linear(fc3, 1)
+  61:     def forward(self, state):
+  62:         x = F.relu(self.fc1(state)); x = F.relu(self.fc2(x)); x = F.relu(self.fc3(x))
+  63:         return self.fc4(x)
+  64: 
+  65: class PPOAgent:
+  66:     def __init__(self, state_size, action_size, seed):
+  67:         self.state_size = state_size; self.action_size = action_size; self.seed = seed
+  68:         random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+  69: 
+  70:         self.action_map = [(A, W, O) for A in config.AMP_BINS
+  71:                                      for W in config.WIDTH_BINS
+  72:                                      for O in config.OFFSET_BINS]
+  73: 
+  74:         self.actor = Actor(state_size, action_size, seed)
+  75:         self.critic = Critic(state_size, seed)
+  76:         self.optimizer = optim.Adam(
+  77:             list(self.actor.parameters()) + list(self.critic.parameters()),
+  78:             lr=config.LR, eps=1e-5
+  79:         )
+  80:         self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=100, gamma=0.95)
+  81: 
+  82:         self.memory = []
+  83:         self.gamma = config.GAMMA; self.gae_lambda = config.GAE_LAMBDA
+  84:         self.clip_range = config.CLIP_RANGE; self.n_epochs = config.N_EPOCHS
+  85:         self.batch_size = config.BATCH_SIZE; self.ent_coef = config.ENT_COEF
+  86:         self.vf_coef = config.VF_COEF; self.max_grad_norm = config.MAX_GRAD_NORM
+  87:         self.target_kl = config.PPO_TARGET_KL
+  88: 
+  89:         self.exploration_noise = 0.1; self.min_exploration_noise = 0.01
+  90:         self.exploration_decay = 0.995
+  91: 
+  92:         self.obs_rms = RunningNorm()
+  93:         self.episode_count = 0
+  94: 
+  95:     def _mask_logits_if_needed(self, logits, state_batch):
+  96:         if logits.ndim == 1:
+  97:             logits = logits.unsqueeze(0); state_batch = state_batch.unsqueeze(0)
+  98:         mask_vals = []
+  99:         for s in state_batch.detach().cpu().numpy():
+ 100:             in_zone = (s[5] >= 0.5)  # assumes idx 5 encodes zone flag in state
+ 101:             if not in_zone:
+ 102:                 mask_vals.append(np.zeros(self.action_size, dtype=np.float32))
+ 103:             else:
+ 104:                 m = np.zeros(self.action_size, dtype=np.float32)
+ 105:                 for idx, (A, _, _) in enumerate(self.action_map):
+ 106:                     if A > config.IN_ZONE_MAX_AMP:
+ 107:                         m[idx] = -1e9
+ 108:                 mask_vals.append(m)
+ 109:         mask = torch.tensor(np.stack(mask_vals), dtype=logits.dtype, device=logits.device)
+ 110:         return logits + mask
+ 111: 
+ 112:     def act(self, state, training=True):
+ 113:         s_np = np.asarray(state, dtype=np.float32)
+ 114:         if s_np.ndim == 1: s_np = s_np[None, :]
+ 115:         if self.obs_rms.mean is None: self.obs_rms.update(s_np)
+ 116:         norm_np = self.obs_rms.normalize(s_np).astype(np.float32)
+ 117:         norm_state = torch.from_numpy(norm_np)
+ 118: 
+ 119:         with torch.no_grad():
+ 120:             logits = self.actor.forward_logits(norm_state)
+ 121:             logits = self._mask_logits_if_needed(logits, norm_state)
+ 122:             probs = F.softmax(logits, dim=-1)
+ 123:             value = self.critic(norm_state).item()
+ 124: 
+ 125:         if torch.isnan(probs).any() or torch.isinf(probs).any():
+ 126:             probs = torch.ones_like(probs) / self.action_size
+ 127: 
+ 128:         if not training and config.EVAL_GREEDY:
+ 129:             action = torch.argmax(probs, dim=-1)
+ 130:             log_prob = torch.log(probs.gather(1, action.view(-1, 1)).squeeze(1) + 1e-8)
+ 131:         else:
+ 132:             if training and self.exploration_noise > self.min_exploration_noise and not config.FREEZE_EXPLORATION_AT_ZONE:
+ 133:                 noise = torch.randn_like(probs) * self.exploration_noise
+ 134:                 probs = F.softmax(torch.log(probs + 1e-8) + noise, dim=-1)
+ 135:             dist = torch.distributions.Categorical(probs)
+ 136:             action = dist.sample(); log_prob = dist.log_prob(action)
+ 137: 
+ 138:         return int(action.item()), float(log_prob.item()), float(value)
+ 139: 
+ 140:     def save_experience(self, s, a, logp, v, r, done, ns):
+ 141:         self.memory.append((s, a, logp, v, r, done, ns))
+ 142: 
+ 143:     def compute_advantages(self):
+ 144:         if not self.memory: return None
+ 145:         states = np.array([m[0] for m in self.memory], dtype=np.float32)
+ 146:         actions = torch.tensor([m[1] for m in self.memory], dtype=torch.long)
+ 147:         old_log_probs = torch.tensor([m[2] for m in self.memory], dtype=torch.float32)
+ 148:         values = torch.tensor([m[3] for m in self.memory], dtype=torch.float32)
+ 149:         rewards = torch.tensor([m[4] for m in self.memory], dtype=torch.float32)
+ 150:         dones = torch.tensor([m[5] for m in self.memory], dtype=torch.float32)
+ 151: 
+ 152:         self.obs_rms.update(states)
+ 153:         norm_states = torch.from_numpy(self.obs_rms.normalize(states)).float()
+ 154: 
+ 155:         if self.memory[-1][5]:
+ 156:             next_value = 0.0
+ 157:         else:
+ 158:             next_state = np.asarray(self.memory[-1][6], dtype=np.float32)
+ 159:             if next_state.ndim == 1: next_state = next_state[None, :]
+ 160:             self.obs_rms.update(next_state)
+ 161:             ns = self.obs_rms.normalize(next_state).astype(np.float32)
+ 162:             with torch.no_grad():
+ 163:                 next_value = self.critic(torch.from_numpy(ns)).item()
+ 164: 
+ 165:         advantages = torch.zeros_like(rewards)
+ 166:         returns = torch.zeros_like(rewards)
+ 167:         gae = 0.0
+ 168:         for t in reversed(range(len(rewards))):
+ 169:             next_v = next_value if t == len(rewards)-1 else values[t+1]
+ 170:             next_done = dones[t] if t == len(rewards)-1 else dones[t+1]
+ 171:             delta = rewards[t] + config.GAMMA * next_v * (1 - next_done) - values[t]
+ 172:             gae = delta + config.GAMMA * config.GAE_LAMBDA * (1 - dones[t]) * gae
+ 173:             advantages[t] = gae; returns[t] = gae + values[t]
+ 174: 
+ 175:         return norm_states, actions, old_log_probs, advantages, returns
+ 176: 
+ 177:     def update(self):
+ 178:         if len(self.memory) < config.N_STEPS: return {}
+ 179:         data = self.compute_advantages()
+ 180:         if data is None: return {}
+ 181:         states, actions, old_log_probs, advantages, returns = data
+ 182:         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+ 183: 
+ 184:         N = len(self.memory)
+ 185:         metrics = {'loss':0.0,'actor_loss':0.0,'critic_loss':0.0,'entropy':0.0,
+ 186:                    'approx_kl':0.0,'clip_frac':0.0,'updates':0}
+ 187: 
+ 188:         for _ in range(config.N_EPOCHS):
+ 189:             perm = torch.randperm(N)
+ 190:             for i in range(0, N, config.BATCH_SIZE):
+ 191:                 idx = perm[i:i+config.BATCH_SIZE]
+ 192:                 if len(idx) < 2: continue
+ 193:                 b_states = states[idx]; b_actions = actions[idx]
+ 194:                 b_old = old_log_probs[idx]; b_adv = advantages[idx]; b_ret = returns[idx]
+ 195: 
+ 196:                 logits = self.actor.forward_logits(b_states)
+ 197:                 logits = self._mask_logits_if_needed(logits, b_states)
+ 198:                 dist = torch.distributions.Categorical(logits=logits)
+ 199:                 new_logp = dist.log_prob(b_actions)
+ 200:                 entropy = dist.entropy().mean()
+ 201: 
+ 202:                 ratios = torch.exp(new_logp - b_old)
+ 203:                 surr1 = ratios * b_adv
+ 204:                 surr2 = torch.clamp(ratios, 1 - config.CLIP_RANGE, 1 + config.CLIP_RANGE) * b_adv
+ 205:                 actor_loss = -torch.min(surr1, surr2).mean()
+ 206: 
+ 207:                 values = self.critic(b_states).squeeze()
+ 208:                 critic_loss = F.mse_loss(values, b_ret)
+ 209: 
+ 210:                 loss = actor_loss + config.VF_COEF * critic_loss - config.ENT_COEF * entropy
+ 211: 
+ 212:                 approx_kl = (b_old - new_logp).mean().item()
+ 213:                 clip_frac = (torch.abs(ratios - 1.0) > config.CLIP_RANGE).float().mean().item()
+ 214: 
+ 215:                 self.optimizer.zero_grad()
+ 216:                 loss.backward()
+ 217:                 nn.utils.clip_grad_norm_(self.actor.parameters(), config.MAX_GRAD_NORM)
+ 218:                 nn.utils.clip_grad_norm_(self.critic.parameters(), config.MAX_GRAD_NORM)
+ 219:                 self.optimizer.step()
+ 220: 
+ 221:                 metrics['loss'] += loss.item()
+ 222:                 metrics['actor_loss'] += actor_loss.item()
+ 223:                 metrics['critic_loss'] += critic_loss.item()
+ 224:                 metrics['entropy'] += entropy.item()
+ 225:                 metrics['approx_kl'] += approx_kl
+ 226:                 metrics['clip_frac'] += clip_frac
+ 227:                 metrics['updates'] += 1
+ 228: 
+ 229:                 if approx_kl > config.PPO_TARGET_KL: break
+ 230: 
+ 231:         self.scheduler.step()
+ 232:         self.exploration_noise = max(self.min_exploration_noise,
+ 233:                                      self.exploration_noise * self.exploration_decay)
+ 234:         self.memory = []
+ 235:         self.episode_count += 1
+ 236: 
+ 237:         if metrics['updates'] > 0:
+ 238:             for k in list(metrics.keys()):
+ 239:                 if k not in ('updates',): metrics[k] /= metrics['updates']
+ 240:         metrics['lr'] = float(self.optimizer.param_groups[0]['lr'])
+ 241:         return metrics
+ 242: 
+ 243:     def obs_norm_state(self): return self.obs_rms.state_dict()
+ 244:     def load_obs_norm_state(self, d): self.obs_rms.load_state_dict(d)

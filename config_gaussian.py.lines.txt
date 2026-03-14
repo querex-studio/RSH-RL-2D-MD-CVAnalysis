@@ -1,0 +1,119 @@
+   1: import os, time
+   2: 
+   3: # ---- Files (Not needed for analytic, but keeping variable names for safety)
+   4: psf_file = None
+   5: pdb_file = None
+   6: toppar_file = None
+   7: 
+   8: # PSP
+   9: START_X, START_Y = 5.0, 4.0
+  10: TARGET_X, TARGET_Y = 1.0, 1.5
+  11: TARGET_RADIUS = 0.2
+  12: 
+  13: # ---- Atoms ----
+  14: ATOM1_INDEX = 0
+  15: ATOM2_INDEX = 1
+  16: 
+  17: # ---- Targets ----
+  18: # Distance from origin
+  19: CURRENT_DISTANCE = 0.5 # Start slightly away from 0 to avoid singularities if any, though 0 is fine
+  20: FINAL_TARGET = 5.0
+  21: TARGET_CENTER = FINAL_TARGET
+  22: TARGET_ZONE_HALF_WIDTH = 1.0
+  23: TARGET_MIN = TARGET_CENTER - TARGET_ZONE_HALF_WIDTH
+  24: TARGET_MAX = TARGET_CENTER + TARGET_ZONE_HALF_WIDTH
+  25: 
+  26: # ---- Milestones ----
+  27: DISTANCE_INCREMENTS = [1, 2, 3, 4, 5]
+  28: 
+  29: # ---- Locks / confinement ----
+  30: ENABLE_MILESTONE_LOCKS = False         
+  31: LOCK_MARGIN = 0.15
+  32: BACKSTOP_K = 1000.0 # Force constant for analytical
+  33: 
+  34: PERSIST_LOCKS_ACROSS_EPISODES = True
+  35: CARRY_STATE_ACROSS_EPISODES = True
+  36: """
+  37: If CARRY_STATE_ACROSS_EPISODES = True, the particle position is not reset at the start of new episode (unless done or max steps reached). 
+  38: This allows the agent to "learn through" the milestone locks and experience the reward shaping more continuously, 
+  39:     rather than always starting fresh outside the first milestone zone. It also allows for a more natural 
+  40:     learning progression where the agent can build on its previous episode's final state.
+  41: """
+  42: 
+  43: FREEZE_EXPLORATION_AT_ZONE = False
+  44: 
+  45: ZONE_CONFINEMENT = True
+  46: ZONE_K = 1000.0
+  47: ZONE_MARGIN_LOW = 0.1
+  48: ZONE_MARGIN_HIGH = 0.1
+  49: SEED_ZONE_CAP_IF_BEST_IN_ZONE = True
+  50: 
+  51: # ---- Observation/action ----
+  52: STATE_SIZE = 8
+  53: AMP_BINS = [0.0, 2.0, 4.0, 6.0, 8.0] # Reduced amplitude by 8x total
+  54: WIDTH_BINS = [0.2, 0.5, 0.8, 1.1]
+  55: OFFSET_BINS = [0.8, 1.6, 2.4, 3.2]
+  56: ACTION_SIZE = len(AMP_BINS) * len(WIDTH_BINS) * len(OFFSET_BINS)
+  57: 
+  58: MIN_AMP, MAX_AMP = 0.0, 30.0
+  59: MIN_WIDTH, MAX_WIDTH = 0.2, 2.5
+  60: MAX_ESCALATION_FACTOR = 1.5
+  61: IN_ZONE_MAX_AMP = 1e9
+  62: 
+  63: # ===================== PPO ================================
+  64: N_STEPS = 8 # Longer collection
+  65: BATCH_SIZE = 4
+  66: N_EPOCHS = 10
+  67: GAMMA = 0.99
+  68: GAE_LAMBDA = 0.95
+  69: CLIP_RANGE = 0.2
+  70: ENT_COEF = 0.05
+  71: VF_COEF = 0.5
+  72: MAX_GRAD_NORM = 0.5
+  73: LR = 3e-4
+  74: PPO_TARGET_KL = 0.03
+  75: 
+  76: # ===================== Episode & MD =======================
+  77: MAX_ACTIONS_PER_EPISODE = 100
+  78: SIM_STEPS = 10 # Steps per action
+  79: DT = 0.01
+  80: TEMPERATURE = 1.0
+  81: FRICTION = 1.0
+  82: 
+  83: # ===================== Rewards ===========================
+  84: # Phase-1
+  85: PROGRESS_REWARD = 10.0       
+  86: MILESTONE_REWARD = 100.0
+  87: BACKTRACK_PENALTY = -1.0
+  88: VELOCITY_BONUS = 5.0
+  89: STEP_PENALTY = -0.1
+  90: BIAS_PENALTY = 0.01
+  91: MAX_BIASES = 100
+  92: 
+  93: # Phase-2
+  94: PHASE2_TOL = 0.1
+  95: CENTER_GAIN = 100.0
+  96: STABILITY_STEPS = 10
+  97: CONSISTENCY_BONUS = 20.0
+  98: ALLOW_INWARD_CORRECTION = False   # if False: do NOT apply inward bias when r > TARGET_MAX
+  99: 
+ 100: # ===================== Curriculum / Eval =================
+ 101: PROB_FRESH_START = 0.1
+ 102: EVAL_EVERY = 50
+ 103: N_EVAL_EPISODES = 1
+ 104: EVAL_GREEDY = True
+ 105: SEED = 42
+ 106: SAVE_CHECKPOINT_EVERY = 50
+ 107: time_tag = time.strftime("%Y%m%d-%H%M%S")
+ 108: 
+ 109: # ===================== Potential =======================
+ 110: # Simple well at origin
+ 111: WELL_DEPTH = 10.0 # kT (since T=1.0)
+ 112: WELL_WIDTH = 1.0
+ 113: 
+ 114: # ===================== Outputs =================
+ 115: RESULTS_DIR = "results_gaussian"
+ 116: PLOTS_DIR = "plots_gaussian"
+ 117: EVAL_PLOTS_DIR = os.path.join(PLOTS_DIR, "eval")
+ 118: METRICS_CSV = f"{RESULTS_DIR}/training_metrics.csv"
+ 119: DCD_SAVE = False 

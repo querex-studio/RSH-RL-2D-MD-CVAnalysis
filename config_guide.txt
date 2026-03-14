@@ -1,0 +1,371 @@
+Gaussian 2D PPO Training on Analytical System
+1Purpose
+This project trains a PPO (Proximal Policy Optimization) agent to control an analytic 2D particle
+moving in a bounded domain [0,2π]×[0,2π]under:
+•a ﬁxed background potential surface proﬁle (PSP) : multiple attractive wells (negative
+Gaussians) plus a barrier (positive Gaussian) and hard wall penalties, and
+•a learned adaptive bias potential : a sum of Gaussian “hills” added by the agent to push
+the particle toward a target location.
+The environment uses an overdamped Langevin (Euler–Maruyama) propagation:
+xt+∆t←xt+F(xt)
+γ∆t+√
+2D∆tN(0,1), D =T
+γ.
+————————————————————————————————————————————
+2Repository Files and Responsibilities
+•agent.py : PPO implementation:
+–Actor/Critic MLPs and Adam optimizer,
+–rollout buﬀer ( memory ), advantage estimation (GAE),
+–PPO clipped objective + value loss + entropy bonus,
+–running observation normalization ( RunningNorm ).
+•env_gaussian_2d.py : the analytic 2D environment:
+–background PSP deﬁnition ( background_potential ,potential_force ),
+–bias potential deﬁnition (sum of Gaussian hills) and force clipping,
+–state vector construction ( STATE_SIZE ),
+–reset andstep (adds a hill, then propagates for SIM_STEPS and computes reward).
+•config_gaussian.py : all hyperparameters and constants, including:
+–start/target location and target radius,
+–discretization of the action space (amplitude, width, oﬀset bins),
+–PPO hyperparameters (learning rate, clip range, entropy coeﬃcient, etc.),
+–Langevin integrator settings ( DT,TEMPERATURE ,FRICTION ,SIM_STEPS ),
+–reward shaping coeﬃcients and output directories.
+•train_gaussian.py : training loop + evaluation + plotting:
+–creates environment + agent, optionally loads checkpoint,
+–runs for n_episodes and periodically evaluates,
+–saves checkpoint agent_gaussian_ckpt.pt ,
+–saves trajectory plots and evaluation rollouts.
+1
+3How to run
+Put the four scripts in the same directory, run train_gaussian.py . This will:
+•train for n_episodes = 5000 (as set in train_gaussian.py ),
+•periodically write plots into config_gaussian.PLOTS_DIR (default plots_gaussian ),
+•write evaluation rollouts into config_gaussian.EVAL_PLOTS_DIR (default plots_gaussian/eval ),
+•save/overwrite the checkpoint agent_gaussian_ckpt.pt in the working directory.
+3.1 Resume training from a checkpoint
+Ifagent_gaussian_ckpt.pt exists, train_gaussian.py loads it automatically before continuing.
+————————————————————————————————————————————
+4Conﬁguration Guide
+This section explains every setting inconfig_gaussian.py and how changing it aﬀects the analytical
+2D Gaussian-bias RL system.
+4.1 File / topology placeholders (kept for compatibility)
+Even though this project uses an analytical 2D potential (no real MD engine), these variables remain
+for safety/compatibility with older code paths.
+•psf_file = None ,pdb_file = None ,toppar_file = None :
+placeholders for CHARMM/NAMD-style inputs. Not used in the analytical environment.
+4.2 PSP / task geometry (start, target, success condition)
+The environment is a particle moving in a 2D periodic or bounded domain (code uses walls else-
+where), with a goal region.
+•START_X, START_Y : initial coordinates (x0, y0)at the beginning of an episode (unless state
+carry-over is enabled).
+•TARGET_X, TARGET_Y : target coordinates (x⋆, y⋆).
+•TARGET_RADIUS : deﬁnes the success set (terminal region):
+G=n
+(x, y) :p
+(x−x⋆)2+ (y−y⋆)2≤TARGET_RADIUSo
+.
+When the particle enters G, the episode typically terminates with a terminal reward/bonus
+(implemented in the environment/training script).
+4.3 Atom indices (single-particle case: used as coordinate anchors)
+Although the environment is analytical and represents a single particle (rather than a full multi-atom
+MD system), the code keeps the “atom index” interface for consistency with MD-style pipelines.
+•ATOM1_INDEX = 0 ,ATOM2_INDEX = 1 : these are set to the ﬁrst two entries in the internal
+coordinate representation (conceptually “particle” and “reference/target anchor”). In a true
+atomistic MD workﬂow, these would index two atoms whose distance deﬁnes a collective
+variable (CV)
+d(r1,r2) =∥r1−r2∥.
+In this single-particle analytical system, the indices are retained as a lightweight way to deﬁne
+adirectional target-pushing coordinate : the environment can interpret the particle position as
+2
+the “moving atom” (index 0) and the target location (or a ﬁxed reference point) as the “anchor”
+(index 1). The agent’s bias then acts to reduce the eﬀective distance-to-target
+dt=p
+(xt−x⋆)2+ (yt−y⋆)2,
+by placing repulsive Gaussian hills behind the particle (i.e. along the unit vector pointing
+away from the target), thereby generating a net force component that drives the particle
+toward (x⋆, y⋆).
+Practical guidance. For this particular one-particle setup, you should not change these
+indices unless you also modify the environment’s coordinate conventions. They are set to 0
+and 1simply because the code expects a pair of indices even in the reduced representation,
+and the simplest consistent choice is to use the ﬁrst two coordinate “slots”.
+4.4 Targets: 1D “radial” coordinate settings
+This block deﬁnes a distance-from-origin coordinate with a target zone. Some settings may be
+partially used depending on which reward mode is active.
+•CURRENT_DISTANCE : initial radius-like value used to avoid singularities if any radial computa-
+tions occur. In general, radius:
+r=p
+x2+y2.
+•FINAL_TARGET : the desired ﬁnal radius.
+•TARGET_CENTER : set equal to FINAL_TARGET .
+•TARGET_ZONE_HALF_WIDTH : half-width of an acceptable radial band.
+•TARGET_MIN ,TARGET_MAX : the band, where
+[TARGET_MIN ,TARGET_MAX ] = [TARGET_CENTER−TARGET_ZONE_HALF_WIDTH ,
+TARGET_CENTER +TARGET_ZONE_HALF_WIDTH ].
+4.5 Milestones (curriculum-like shaping)
+•DISTANCE_INCREMENTS = [1,2,3,4,5] : milestone radii (or progress checkpoints) that can
+trigger bonuses. Typically, reaching each milestone once yields an additional reward (see
+MILESTONE_REWARD ).
+4.6 Locks / conﬁnement settings
+These settings deﬁne optional constraints that prevent backtracking or conﬁne the particle once
+milestones or zones are reached.
+•ENABLE_MILESTONE_LOCKS :
+–False : milestones do not impose hard constraints.
+–True : after reaching a milestone, the system may be prevented from moving back past it.
+•LOCK_MARGIN : tolerance margin around lock boundary. If a lock is at radius rL, the forbidden
+region may begin at r < r L−LOCK_MARGIN (exact form depends on environment code).
+•BACKSTOP_K : force constant for a “backstop” penalty potential. A common analytic form is a
+quadratic wall:
+Ubackstop (r) =1
+2k(r−rmin)2ifr < r min,
+with k=BACKSTOP_K .
+•PERSIST_LOCKS_ACROSS_EPISODES :
+–ifTrue , once a milestone lock is earned, it stays active in later episodes.
+–ifFalse , locks reset each episode.
+3
+•CARRY_STATE_ACROSS_EPISODES :
+–ifTrue , the particle position/state is not reset at the start of each episode (unless termi-
+nation or forced reset).
+–ifFalse , each episode starts at START_X,START_Y .
+•FREEZE_EXPLORATION_AT_ZONE :
+–ifTrue , exploration noise may be disabled once the particle is inside a target zone (helps
+stabilize convergence).
+–ifFalse , exploration continues normally.
+•ZONE_CONFINEMENT :
+–ifTrue , apply a conﬁning potential once in a zone (e.g. keep rwithin bounds or keep
+near target).
+•ZONE_K : force constant for zone conﬁnement (analogous to BACKSTOP_K ).
+•ZONE_MARGIN_LOW ,ZONE_MARGIN_HIGH : margins deﬁning how far below/above a zone boundary
+the particle can drift before conﬁnement forces apply.
+•SEED_ZONE_CAP_IF_BEST_IN_ZONE :
+–ifTrue , once the best performance is achieved in-zone, the code may set caps/limits (e.g.
+reduce allowable bias amplitude) to encourage stability rather than further exploration.
+4.7 Observation and action space
+4.7.1 State dimensionality
+•STATE_SIZE : the observation vector length. Typical entries in such environments include (x, y),
+distance to target, previous distance, in-zone ﬂag, step count, etc. The exact meaning of each
+index is deﬁned in env_gaussian_2d.py .
+4.7.2 Discrete action parametrization via bins
+Actions are discrete indices, each mapped to a tuple (A, σ, ∆)controlling a Gaussian bias “hill”.
+•AMP_BINS : allowed amplitudes A(strength of bias).
+•WIDTH_BINS : allowed widths σ(spatial spread).
+•OFFSET_BINS : allowed oﬀsets ∆(distance to place hill center from current position, typically
+along some direction).
+Total action count:
+ACTION_SIZE =|AMP_BINS|·|WIDTH_BINS|·|OFFSET_BINS|.
+Then the discrete action index atchosen by the agent at environment step tis:
+at∈{0,1,2, . . . ,|A|− 1},|A|=ACTION_SIZE .
+Therefore, selecting atimplies a deterministic mapping
+ataction_map−−−−−−−−→ (At, σt,∆t),
+where (At, σt,∆t)are the parameters used at step t.
+4.7.3 Bias hill
+A 2D Gaussian hill centered at c:
+Ubias(x) =Aexp
+−∥x−c∥2
+2σ2
+.
+4
+The corresponding force contribution (negative gradient) is:
+Fbias(x) =−∇Ubias(x) =−Aexp
+−∥x−c∥2
+2σ2
+·x−c
+σ2.
+(Your environment code may sum multiple hills.)
+4.7.4 Continuous bounds and escalation control (safety limits)
+•MIN_AMP, MAX_AMP : global allowed amplitude range. Even if bins are smaller, these can be
+used to clip or validate.
+•MIN_WIDTH, MAX_WIDTH : global allowed width range.
+•MAX_ESCALATION_FACTOR : prevents increasing hill parameters too aggressively from one step
+to the next. A typical rule is:
+At+1≤MAX_ESCALATION_FACTOR ·At,
+or similar for width/oﬀset (exact usage depends on environment).
+•IN_ZONE_MAX_AMP : cap on amplitudes when in-zone. Set to 109here, eﬀectively “no cap” unless
+action masking is used elsewhere.
+4.8 PPO hyperparameters (policy optimization)
+This block controls PPO training dynamics. We consider an episodic Markov Decision Process
+(MDP). At each environment step t:
+•st∈Rd: state/observation returned by the environment.
+•at∈{0,1, . . . ,|A|− 1}: discrete action index sampled from the policy.
+•rt∈R: scalar reward received after taking atinst.
+•st+1: next state.
+•dt∈{0,1}: done ﬂag indicating termination at step t(ifdt= 1, the episode ends after this
+transition).
+•πθ(a|s): stochastic policy (actor) parameterized by θ.
+•Vϕ(s): value function (critic) parameterized by ϕ; approximates expected return from s.
+•γ∈(0,1): discount factor (conﬁg: GAMMA ).
+•λ∈[0,1]: GAE parameter (conﬁg: GAE_LAMBDA ).
+4.8.1 Returns and advantages
+Discounted return. The (inﬁnite-horizon) discounted return from time tis
+Gt=∞X
+k=0γkrt+k.
+In practice, we estimate Gtwith ﬁnite rollouts and value bootstrapping.
+TD residual (one-step error). The temporal-diﬀerence residual is
+δt=rt+γ(1−dt)Vϕ(st+1)−Vϕ(st).
+The factor (1−dt)ensures that if the episode terminates, we do not bootstrap from Vϕ(st+1).
+5
+GAE advantage. Generalized Advantage Estimation deﬁnes
+ˆAt=∞X
+l=0(γλ)lδt+l,
+implemented via backward recursion
+ˆAt=δt+γλ(1−dt)ˆAt+1.
+Return target for critic. A common construction (also used here) is
+ˆRt=ˆAt+Vϕ(st),
+so the critic can be trained with MSE to ˆRt.
+4.8.2 PPO policy update
+Behavior vs current policy. Data are collected under an “old” policy πθold(the policy at sam-
+pling time). During update, we evaluate the same actions under the current policy πθ.
+Probability ratio. For a stored transition (st, at):
+rt(θ) =πθ(at|st)
+πθold(at|st)= exp(log πθ(at|st)−logπθold(at|st)).
+Clipped surrogate objective. With ϵ=CLIP_RANGE :
+LCLIP(θ) =Eth
+min
+rt(θ)ˆAt,clip(rt(θ),1−ϵ,1 +ϵ)ˆAti
+.
+The actor loss is typically Lπ=−LCLIP.
+Entropy.
+H(πθ(·|st)) =−X
+a∈Aπθ(a|st) logπθ(a|st).
+Value loss.
+LV(ϕ) =Et
+Vϕ(st)−ˆRt2
+.
+Total optimization loss (typical). With coeﬃcients ce=ENT_COEF andcv=VF_COEF :
+L(θ, ϕ) =−LCLIP(θ) +cvLV(ϕ)−ceEt[H(πθ(·|st))].
+4.8.3 Hyperparameter deﬁnitions
+•N_STEPS (rollout horizon / on-policy batch size):
+This is the number of environment steps collected before running one PPO update .
+Concretely, the agent interacts with the environment for N_STEPS transitions, storing:
+{(st, at, rt, st+1, dt,logπθold(at|st), Vϕ(st))}N_STEPS
+t=1 ,
+then computes ˆAtand ˆRtfor those transitions and performs optimization.
+6
+Important: one “step” here is a macro environment step. In your analytical envi-
+ronment, each environment step corresponds to one selected bias action (one hill placement),
+followed by SIM_STEPS micro-steps of Langevin dynamics. Therefore:
+micro-steps per PPO rollout ≈N_STEPS×SIM_STEPS .
+So increasing N_STEPS increases how much trajectory you collect per update.
+Trade-oﬀ.
+–Larger N_STEPS : better advantage estimation (more diverse on-policy data per update),
+but higher memory/compute and slightly more “policy lag” (updates are based on older
+behavior data).
+–Smaller N_STEPS : more frequent updates, but noisier gradients and potentially less stable
+learning.
+•BATCH_SIZE (minibatch size for SGD):
+After collecting N_STEPS samples, PPO performs gradient updates using minibatches of size
+BATCH_SIZE . Each minibatch is a subset of the rollout transitions used to compute stochastic
+gradients.
+•N_EPOCHS (optimization epochs per rollout):
+Number of passes over the same N_STEPS rollout data during one PPO update. Larger
+N_EPOCHS increases sample reuse, but too large may overﬁt the on-policy batch and violate
+PPO’s small-update assumption.
+•GAMMA (γ):
+Discount factor controlling how much future rewards matter relative to immediate rewards.
+•GAE_LAMBDA (λ):
+GAE parameter controlling bias–variance of ˆAt.
+•CLIP_RANGE (ϵ):
+PPO clipping range limiting how far the policy is allowed to move per update (via the ratio
+rt(θ)).
+•ENT_COEF (ce):
+Coeﬃcient on entropy bonus. Higher encourages exploration; too high can prevent conver-
+gence.
+•VF_COEF (cv):
+Coeﬃcient scaling critic MSE loss. Too low yields poor value estimates; too high can dominate
+the actor loss.
+•MAX_GRAD_NORM :
+Gradient norm clipping threshold:
+∥∇∥ 2←min(∥∇∥ 2,MAX_GRAD_NORM ),
+preventing exploding gradients and stabilizing learning.
+•LR:
+Learning rate for Adam applied to actor+critic parameters. Lower improves stability but slows
+learning.
+•PPO_TARGET_KL :
+Early-stopping threshold on an approximate KL divergence between πθoldandπθ:
+cKL≈Et[logπθold(at|st)−logπθ(at|st)].
+IfcKLexceeds PPO_TARGET_KL , stop further epochs/minibatches in that update to avoid overly
+large policy updates.
+7
+4.9 Episode and dynamics (MD-like integrator settings)
+These govern how the environment evolves between actions.
+•MAX_ACTIONS_PER_EPISODE : maximum number of macro-actions (bias placements) in an episode
+before truncation.
+•SIM_STEPS : number of micro-steps of dynamics per macro-action.
+•DT: micro-step timestep ∆t.
+•TEMPERATURE (T): noise scale for Langevin diﬀusion.
+•FRICTION (γ): friction coeﬃcient.
+Overdamped Langevin update. A standard Euler–Maruyama step in overdamped regime:
+xt+∆t=xt+1
+γF(xt)∆t+√
+2D∆tη,η∼N (0, I),
+with diﬀusion coeﬃcient D=T
+γ(in reduced units).
+4.10 Rewards (Phase 1 shaping + Phase 2 stabilization)
+This conﬁg supports a two-phase reward scheme: (i) reach the goal/progress, (ii) stabilize/maintain
+in a zone.
+4.10.1 Phase 1 (reach/progress)
+•PROGRESS_REWARD : scale for progress-based shaping, commonly:
+rprog
+t=PROGRESS_REWARD ·(dt−1−dt),
+where dtis distance to target.
+•MILESTONE_REWARD : bonus when crossing milestone thresholds (e.g. reaching a new distance
+increment).
+•BACKTRACK_PENALTY : negative reward when regressing (distance increases or crossing back over
+milestones).
+•VELOCITY_BONUS : extra reward for fast motion toward target; often uses displacement per
+action step (exact formula depends on environment).
+•STEP_PENALTY : per-action penalty to encourage fewer actions (faster completion).
+•BIAS_PENALTY : penalizes large bias usage, often proportional to amplitude magnitude:
+rbias
+t=−BIAS_PENALTY·|At|.
+•MAX_BIASES : maximum number of hills (bias terms) to keep/sum; controls memory/force com-
+plexity.
+4.10.2 Phase 2 (stay centered / stable)
+•PHASE2_TOL : tolerance deﬁning “close enough” to center/target in phase 2.
+•CENTER_GAIN : reward gain for staying close to the target center; e.g.
+rcenter
+t =CENTER_GAIN·max(0 ,PHASE2_TOL−dt),
+or another decreasing function of dt.
+•STABILITY_STEPS : number of consecutive steps required within tolerance to declare success/stability.
+•CONSISTENCY_BONUS : reward for maintaining stability for STABILITY_STEPS steps.
+•ALLOW_INWARD_CORRECTION :
+–ifFalse , do not apply inward bias corrections when r > TARGET_MAX (prevents certain
+corrective actions).
+–ifTrue , permit corrective bias to push the particle back into the target band.
+8
+4.11 Curriculum, evaluation, logging and reproducibility
+•PROB_FRESH_START : probability of resetting to the start even if CARRY_STATE_ACROSS_EPISODES=True .
+Implements a mixed regime: mostly continue, sometimes restart.
+•EVAL_EVERY : run evaluation every Ntraining episodes.
+•N_EVAL_EPISODES : number of evaluation episodes per evaluation run.
+•EVAL_GREEDY : ifTrue , evaluation uses greedy action selection:
+a= arg max
+aπθ(a|s),
+rather than sampling.
+•SEED : random seed for reproducibility (NumPy, possibly Torch and environment RNG).
+•time_tag : timestamp string used to uniquely label outputs.
+•SAVE_CHECKPOINT_EVERY : save model checkpoint every Nepisodes.
+4.12 Potential parameters (background landscape)
+This block deﬁnes the analytic “well” (background potential contribution). A common 2D Gaussian
+well centered at the origin is:
+Uwell(x) =−Dexp
+−∥x∥2
+2σ2
+,
+where D > 0is depth and σcontrols width.
+•WELL_DEPTH : depth scale (noted in units of kTsince TEMPERATURE=1.0 ).
+•WELL_WIDTH : width parameter (interpretable as σin the Gaussian).
+4.13 Outputs
+•RESULTS_DIR : directory for logs/CSV outputs.
+•PLOTS_DIR : directory for training plots.
+•EVAL_PLOTS_DIR : directory for evaluation plots (subdirectory of PLOTS_DIR ).
+•METRICS_CSV : path for training metrics CSV (episode rewards, steps, success ﬂags, etc.).
+•DCD_SAVE : whether to save trajectories in DCD format. False here; typically irrelevant for
+analytic environment.
+4.14 Practical tuning guidance (how to change settings safely)
+If the agent never reaches the target: Increase PROGRESS_REWARD , reduce STEP_PENALTY mag-
+nitude, increase MAX_ACTIONS_PER_EPISODE , or expand AMP_BINS /OFFSET_BINS .
+If the agent uses overly strong hills: Increase BIAS_PENALTY , shrink AMP_BINS , and/or set a
+realistic IN_ZONE_MAX_AMP with masking.
+If dynamics are too noisy: Lower TEMPERATURE , increase FRICTION , or lower DT.
+If PPO becomes unstable (NaNs, oscillation): Lower LR, increase BATCH_SIZE , reduce ENT_COEF ,
+and/or reduce CLIP_RANGE . Consider lowering PPO_TARGET_KL to stop updates earlier.
+9

@@ -1,0 +1,288 @@
+   1: import sys, os, torch
+   2: import numpy as np
+   3: from matplotlib import ticker
+   4: import matplotlib.pyplot as plt
+   5: from matplotlib.colors import Normalize
+   6: from matplotlib.colors import PowerNorm
+   7: from matplotlib.ticker import MaxNLocator
+   8: from mpl_toolkits.axes_grid1 import make_axes_locatable
+   9: 
+  10: # Hack to inject config_gaussian as config for agent.py
+  11: import config_gaussian
+  12: sys.modules['config'] = config_gaussian
+  13: 
+  14: from agent import PPOAgent
+  15: from env_gaussian_2d import Gaussian2DEnvironment
+  16: 
+  17: def plot_2d_trajectory(env, episode_num, out_dir=None):
+  18:     if out_dir is None:
+  19:         out_dir = config_gaussian.PLOTS_DIR
+  20:     if not env.episode_xy_segments:
+  21:         return
+  22: 
+  23:     xy_data = np.concatenate(env.episode_xy_segments)
+  24: 
+  25:     fig, ax = plt.subplots(figsize=(6, 6))
+  26:     ax.set_aspect('equal', adjustable='box')
+  27: 
+  28:     # --- Domain for multiwell PSP ---
+  29:     min_v = 0.0
+  30:     max_v = 2.0 * np.pi
+  31:     grid_n = 250
+  32:     xs = np.linspace(min_v, max_v, grid_n)
+  33:     ys = np.linspace(min_v, max_v, grid_n)
+  34:     X, Y = np.meshgrid(xs, ys)
+  35: 
+  36:     # --- PSP background (EXACTLY env.background_potential) ---
+  37:     Z = np.zeros_like(X, dtype=float)
+  38:     for i in range(grid_n):
+  39:         for j in range(grid_n):
+  40:             Z[i, j] = env.background_potential([X[i, j], Y[i, j]])
+  41: 
+  42:     # Bias heatmap
+  43:     # --- PSP normalization (pure PSP only) ---
+  44:     lo, hi = np.percentile(Z, [2, 98])
+  45:     if hi <= lo:
+  46:         lo, hi = float(Z.min()), float(Z.max()) + 1e-6
+  47:     norm_psp = Normalize(vmin=lo, vmax=hi)
+  48: 
+  49:     # --- Draw PSP background (clearer colors + field lines) ---
+  50:     cf = ax.contourf(
+  51:         X, Y, Z,
+  52:         levels=80,
+  53:         cmap="winter",
+  54:         alpha=0.65,
+  55:         norm=norm_psp,
+  56:         zorder=0
+  57:     )
+  58:     ax.contour(
+  59:         X, Y, Z,
+  60:         levels=22,
+  61:         colors="k",
+  62:         alpha=0.65,
+  63:         linewidths=1.0,
+  64:         zorder=1
+  65:     )
+  66: 
+  67:     # --- Bias field (sum of hills) ---
+  68:     B = np.zeros_like(X, dtype=float)
+  69:     for (A, x0, y0, sigma) in env.all_biases_in_episode:
+  70:         A = float(A)
+  71:         if A == 0.0:
+  72:             continue
+  73:         sigma = max(float(sigma), 1e-6)
+  74:         dx = X - float(x0)
+  75:         dy = Y - float(y0)
+  76:         B += A * np.exp(-(dx*dx + dy*dy) / (2.0 * sigma * sigma))
+  77: 
+  78:     bias_im = None
+  79:     if np.any(B > 0):
+  80:         vmax_b = np.percentile(B[B > 0], 98)
+  81:         if vmax_b <= 0:
+  82:             vmax_b = float(B.max()) + 1e-12
+  83: 
+  84:         # Nonlinear contrast for bias so differences are visible
+  85:         norm_b = PowerNorm(gamma=0.9, vmin=0.0, vmax=vmax_b, clip=True)
+  86: 
+  87:         # Use a high-contrast cmap vs viridis
+  88:         bias_im = ax.imshow(
+  89:             B,
+  90:             extent=[min_v, max_v, min_v, max_v],
+  91:             origin="lower",
+  92:             cmap="OrRd",
+  93:             alpha=0.60,
+  94:             norm=norm_b,
+  95:             interpolation="none",
+  96:             zorder=2,
+  97:         )
+  98: 
+  99:     # --- Two same-height colorbars using AxesDivider (no overlap) ---
+ 100:     divider = make_axes_locatable(ax)
+ 101: 
+ 102:     # More separation between bars
+ 103:     cax_bias = divider.append_axes("right", size="4.5%", pad=0.5)
+ 104:     cax_psp  = divider.append_axes("right", size="4.5%", pad=0.5)
+ 105: 
+ 106:     # Make room on the right for labels
+ 107:     fig.subplots_adjust(right=0.9)
+ 108: 
+ 109:     # Tuning knobs
+ 110:     N_TICKS = 7          # smaller number of ticks
+ 111:     CB_ALPHA = 0.3      # lower opacity for the colorbar gradients
+ 112:     LABELPAD_BIAS = 4    # closer label (can be 0 or negative)
+ 113:     LABELPAD_PSP  = 4
+ 114: 
+ 115:     # ---- Bias colorbar ----
+ 116:     if bias_im is not None:
+ 117:         cb_bias = fig.colorbar(bias_im, cax=cax_bias)
+ 118:         cb_bias.set_label("Bias (sum of hills)", fontsize=9, labelpad=LABELPAD_BIAS)
+ 119: 
+ 120:         # ticks on the LEFT
+ 121:         cb_bias.ax.yaxis.set_ticks_position("left")
+ 122:         cb_bias.ax.yaxis.set_label_position("right")  # keep label on left too
+ 123: 
+ 124:         # fewer ticks
+ 125:         cb_bias.locator = MaxNLocator(nbins=N_TICKS)
+ 126:         cb_bias.update_ticks()
+ 127: 
+ 128:         # lower opacity of the colorbar gradient
+ 129:         cb_bias.set_alpha(CB_ALPHA)
+ 130:         fig.canvas.draw_idle()
+ 131: 
+ 132:         cb_bias.ax.tick_params(labelsize=9)
+ 133: 
+ 134:     else:
+ 135:         cax_bias.remove()
+ 136: 
+ 137:     # ---- PSP colorbar ----
+ 138:     cb_psp = fig.colorbar(cf, cax=cax_psp)
+ 139:     cb_psp.set_label("Potential (PSP)", fontsize=9, labelpad=LABELPAD_PSP)
+ 140: 
+ 141:     # ticks on the LEFT
+ 142:     cb_psp.ax.yaxis.set_ticks_position("left")
+ 143:     cb_psp.ax.yaxis.set_label_position("right")
+ 144: 
+ 145:     # fewer ticks
+ 146:     cb_psp.locator = MaxNLocator(nbins=N_TICKS)
+ 147:     cb_psp.update_ticks()
+ 148: 
+ 149:     # lower opacity of the colorbar gradient
+ 150:     cb_psp.set_alpha(CB_ALPHA)
+ 151:     fig.canvas.draw_idle()
+ 152: 
+ 153:     cb_psp.ax.tick_params(labelsize=9)
+ 154: 
+ 155:     # --- Trajectory ---
+ 156:     ax.plot(xy_data[:, 0], xy_data[:, 1], 'k-', alpha=0.6, linewidth=1, zorder=7)
+ 157: 
+ 158:     # --- Start marker (from config if available) ---
+ 159:     if hasattr(config_gaussian, "START_X") and hasattr(config_gaussian, "START_Y"):
+ 160:         ax.plot(config_gaussian.START_X, config_gaussian.START_Y, 'go', label='Start', alpha=0.8, zorder=7)
+ 161:     else:
+ 162:         ax.plot(xy_data[0, 0], xy_data[0, 1], 'go', label='Start')
+ 163: 
+ 164:     # --- Target marker + radius (from config if available) ---
+ 165:     if hasattr(config_gaussian, "TARGET_X") and hasattr(config_gaussian, "TARGET_Y") and hasattr(config_gaussian, "TARGET_RADIUS"):
+ 166:         ax.plot(config_gaussian.TARGET_X, config_gaussian.TARGET_Y, 'r*', markersize=10, label='Target', zorder=7)
+ 167:         target_circle = plt.Circle(
+ 168:             (config_gaussian.TARGET_X, config_gaussian.TARGET_Y),
+ 169:             config_gaussian.TARGET_RADIUS,
+ 170:             color='r', fill=False, linestyle='--', linewidth=1.2, zorder=7
+ 171:         )
+ 172:         ax.add_patch(target_circle)
+ 173:     else:
+ 174:         ax.plot(xy_data[-1, 0], xy_data[-1, 1], 'ro', label='End', zorder=7)
+ 175:     
+ 176:     ax.set_xlim(min_v, max_v)
+ 177:     ax.set_ylim(min_v, max_v)
+ 178:     ax.set_xlabel("X")
+ 179:     ax.set_ylabel("Y")
+ 180:     ax.set_title(f"Episode {episode_num}")
+ 181:     ax.legend(loc="upper right")
+ 182: 
+ 183:     os.makedirs(out_dir, exist_ok=True)
+ 184:     out_path = os.path.join(out_dir, f"traj_ep_{episode_num:04d}.png")
+ 185:     fig.savefig(out_path, dpi=200)
+ 186:     plt.close(fig)
+ 187: 
+ 188: def evaluate(agent, n_eps=5, train_ep=0):
+ 189:     env = Gaussian2DEnvironment()
+ 190:     scores = []
+ 191:     steps_list = []
+ 192:     success = 0
+ 193: 
+ 194:     for k in range(n_eps):
+ 195:         state = env.reset(episode_index=10_000 + k)  # arbitrary
+ 196:         done = False
+ 197:         steps = 0
+ 198:         score = 0.0
+ 199: 
+ 200:         while not done and steps < config_gaussian.MAX_ACTIONS_PER_EPISODE:
+ 201:             # evaluation: no exploration noise
+ 202:             action, logp, value = agent.act(state, training=True)
+ 203:             state, reward, done, traj = env.step(action)
+ 204:             score += reward
+ 205:             steps += 1
+ 206: 
+ 207:         scores.append(score)
+ 208:         steps_list.append(steps)
+ 209:         if done:
+ 210:             success += 1
+ 211:         
+ 212:         np.savetxt(
+ 213:             os.path.join(config_gaussian.EVAL_PLOTS_DIR, f"traj_ep_{train_ep:04d}_roll_{k:02d}.csv"),
+ 214:             np.concatenate(env.episode_xy_segments, axis=0),
+ 215:             delimiter=",",
+ 216:             header="x,y",
+ 217:             comments=""
+ 218:         )
+ 219: 
+ 220:         plot_2d_trajectory(
+ 221:             env,
+ 222:             episode_num=train_ep + k,   # unique per evaluation call
+ 223:             out_dir=config_gaussian.EVAL_PLOTS_DIR
+ 224:         )
+ 225: 
+ 226:     return {
+ 227:         "eval_score_mean": float(np.mean(scores)),
+ 228:         "eval_score_std": float(np.std(scores)),
+ 229:         "eval_steps_mean": float(np.mean(steps_list)),
+ 230:         "eval_success_rate": float(success / n_eps),
+ 231:     }
+ 232: 
+ 233: def train():
+ 234:     print("Starting training on Gaussian 2D Environment...")
+ 235:     
+ 236:     # Initialize environment and agent
+ 237:     env = Gaussian2DEnvironment()
+ 238:     agent = PPOAgent(config_gaussian.STATE_SIZE, config_gaussian.ACTION_SIZE, config_gaussian.SEED)
+ 239:     
+ 240:     # Load existing agent if available to continue training or valid
+ 241:     if os.path.exists("agent_gaussian_ckpt.pt"):
+ 242:         print("Loading pre-trained agent...")
+ 243:         ckpt = torch.load("agent_gaussian_ckpt.pt", map_location="cpu")
+ 244:         agent.actor.load_state_dict(ckpt["actor"])
+ 245:         agent.critic.load_state_dict(ckpt["critic"])
+ 246:     
+ 247:     n_episodes = 5000
+ 248:     
+ 249:     for ep in range(1, n_episodes + 1):
+ 250:         state = env.reset(episode_index=ep)
+ 251:         done = False
+ 252:         steps = 0
+ 253:         score = 0
+ 254:         
+ 255:         while not done and steps < config_gaussian.MAX_ACTIONS_PER_EPISODE:
+ 256:             action, logp, value = agent.act(state, training=True)
+ 257:             next_state, reward, done, traj = env.step(action)
+ 258:             
+ 259:             agent.save_experience(state, action, logp, value, reward, done, next_state)
+ 260:             
+ 261:             state = next_state
+ 262:             score += reward
+ 263:             steps += 1
+ 264:             
+ 265:         # Update agent
+ 266:         metrics = agent.update()
+ 267: 
+ 268:         if ep % config_gaussian.EVAL_EVERY == 0:
+ 269:             rng_state = np.random.get_state()
+ 270:             eval_metrics = evaluate(agent, n_eps=config_gaussian.N_EVAL_EPISODES, train_ep=ep)
+ 271:             np.random.set_state(rng_state)
+ 272:             print("EVAL:", eval_metrics)
+ 273: 
+ 274:         #print("n_biases:", len(env.all_biases_in_episode), "first:", env.all_biases_in_episode[:3])
+ 275:         
+ 276:         if ep % 100 == 0 or ep == 1:
+ 277:             print(f"Episode {ep}/{n_episodes} | Score: {score:.2f} | Steps: {steps} | Loss: {metrics.get('loss', 0):.3f}")
+ 278:             plot_2d_trajectory(env, ep)
+ 279:             torch.save(
+ 280:                 {"actor": agent.actor.state_dict(),
+ 281:                  "critic": agent.critic.state_dict()},
+ 282:                 "agent_gaussian_ckpt.pt"
+ 283:             )
+ 284:             
+ 285:     print("Training finished.")
+ 286: 
+ 287: if __name__ == "__main__":
+ 288:     train()

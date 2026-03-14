@@ -1,0 +1,324 @@
+   1: import numpy as np
+   2: import config_gaussian as config
+   3: from collections import deque
+   4: 
+   5: 
+   6: class Gaussian2DEnvironment:
+   7:     """
+   8:     2D analytic environment with:
+   9:       - Fixed background PSP: multiwell (negative Gaussians) + barrier (positive Gaussian) + hard walls
+  10:       - Adaptive bias: sum of 2D Gaussian hills in (x,y)
+  11:       - Overdamped Langevin (Euler–Maruyama): x <- x + (F/gamma)dt + sqrt(2Ddt)N(0,1)
+  12:     """
+  13: 
+  14:     def __init__(self):
+  15:         self.state_size = config.STATE_SIZE
+  16:         self.action_size = config.ACTION_SIZE
+  17: 
+  18:         self.current_position = np.array([0.0, 0.0], dtype=float)
+  19:         self.dist_to_target = 0.0
+  20: 
+  21:         self.distance_history = deque(maxlen=10)
+  22:         self.episode_trajectory_segments = []   # store dist_to_target over MD steps
+  23:         self.episode_xy_segments = []           # store (x,y) over MD steps
+  24: 
+  25:         self.all_biases_in_episode = []
+  26: 
+  27:         # action map (A, width, offset)
+  28:         self.action_tuples = []
+  29:         for A in config.AMP_BINS:
+  30:             for W in config.WIDTH_BINS:
+  31:                 for O in config.OFFSET_BINS:
+  32:                     self.action_tuples.append((float(A), float(W), float(O)))
+  33: 
+  34:         self.reset()
+  35: 
+  36:     # -----------------------
+  37:     # Reset / State
+  38:     # -----------------------
+  39:     def reset(self, seed_from_max_A=None, carry_state=False, episode_index=None):
+  40:         # always start from START_X/START_Y unless you explicitly carry_state=True
+  41:         if not carry_state:
+  42:             self.current_position = np.array([float(config.START_X), float(config.START_Y)], dtype=float)
+  43:             self.current_position += np.random.normal(0, 0.05, size=2)
+  44: 
+  45:         self._clip_to_domain()
+  46: 
+  47:         self.dist_to_target = self._dist_to_target(self.current_position)
+  48:         self.distance_history.clear()
+  49:         self.distance_history.append(self.dist_to_target)
+  50: 
+  51:         self.all_biases_in_episode = []
+  52:         self.episode_trajectory_segments = []
+  53:         self.episode_xy_segments = []
+  54: 
+  55:         return self.get_state()
+  56: 
+  57:     def get_state(self):
+  58:         """
+  59:         Keep STATE_SIZE=8 but make features target-centric (XY target),
+  60:         so PPO input shape stays unchanged.
+  61:         """
+  62:         self.distance_history.append(self.dist_to_target)
+  63: 
+  64:         # trend: decreasing dist is good (negative trend)
+  65:         if len(self.distance_history) >= 3:
+  66:             recent_trend = (self.distance_history[-1] - self.distance_history[-3]) / 2.0
+  67:         else:
+  68:             recent_trend = 0.0
+  69: 
+  70:         # stability from recent distance variance
+  71:         if len(self.distance_history) >= 5:
+  72:             stability = 1.0 / (1.0 + np.std(list(self.distance_history)[-5:]))
+  73:         else:
+  74:             stability = 0.5
+  75: 
+  76:         # normalized distance (scale by typical map size ~2π)
+  77:         dist_norm = self.dist_to_target / (2.0 * np.pi)
+  78: 
+  79:         in_zone = float(self.dist_to_target <= float(config.TARGET_RADIUS))
+  80: 
+  81:         # simple "overall progress" proxy: compare to start distance
+  82:         start_dist = np.sqrt((config.START_X - config.TARGET_X) ** 2 + (config.START_Y - config.TARGET_Y) ** 2)
+  83:         overall = 1.0 - (self.dist_to_target / (start_dist + 1e-12))
+  84:         overall = float(np.clip(overall, 0.0, 1.0))
+  85: 
+  86:         state = np.array(
+  87:             [
+  88:                 dist_norm,          # 0
+  89:                 overall,            # 1
+  90:                 recent_trend / 0.1, # 2
+  91:                 in_zone,            # 3
+  92:                 stability,          # 4
+  93:                 float(len(self.all_biases_in_episode) / max(1, config.MAX_BIASES)),  # 5
+  94:                 self.current_position[0] / (2.0 * np.pi),  # 6
+  95:                 self.current_position[1] / (2.0 * np.pi),  # 7
+  96:             ],
+  97:             dtype=np.float32,
+  98:         )
+  99:         return state
+ 100: 
+ 101:     # -----------------------
+ 102:     # Background PSP (your OpenMM multiwell design)
+ 103:     # -----------------------
+ 104:     @staticmethod
+ 105:     def _multiwell_params():
+ 106:         amp_kj = 6.0 * 4.184  # kJ/mol
+ 107:         A_i = np.array([0.9, 0.3, 0.5, 1.0, 0.2, 0.4, 0.9, 0.9, 0.9], dtype=float) * amp_kj
+ 108:         x0_i = np.array([1.12, 1.0, 3.0, 4.15, 4.0, 5.27, 5.5, 6.0, 1.0], dtype=float)
+ 109:         y0_i = np.array([1.34, 2.25, 2.31, 3.62, 5.0, 4.14, 4.5, 1.52, 5.0], dtype=float)
+ 110:         sx_i = np.array([0.5, 0.3, 0.4, 2.0, 0.9, 1.0, 0.3, 0.5, 0.5], dtype=float)
+ 111:         sy_i = np.array([0.5, 0.3, 1.0, 0.8, 0.2, 0.3, 1.0, 0.6, 0.7], dtype=float)
+ 112: 
+ 113:         A_j = np.array([0.3], dtype=float) * amp_kj
+ 114:         x0_j = np.array([np.pi], dtype=float)
+ 115:         y0_j = np.array([np.pi], dtype=float)
+ 116:         sx_j = np.array([3.0], dtype=float)
+ 117:         sy_j = np.array([0.3], dtype=float)
+ 118: 
+ 119:         return amp_kj, A_i, x0_i, y0_i, sx_i, sy_i, A_j, x0_j, y0_j, sx_j, sy_j
+ 120: 
+ 121:     def background_potential(self, pos):
+ 122:         x, y = float(pos[0]), float(pos[1])
+ 123:         amp_kj, A_i, x0_i, y0_i, sx_i, sy_i, A_j, x0_j, y0_j, sx_j, sy_j = self._multiwell_params()
+ 124: 
+ 125:         U = float(amp_kj)  # flat offset
+ 126: 
+ 127:         # wells (negative Gaussians)
+ 128:         dx = x - x0_i
+ 129:         dy = y - y0_i
+ 130:         arg = (dx * dx) / (2.0 * sx_i * sx_i) + (dy * dy) / (2.0 * sy_i * sy_i)
+ 131:         U += float(-np.sum(A_i * np.exp(-arg)))
+ 132: 
+ 133:         # barrier (positive Gaussian)
+ 134:         dxj = x - x0_j
+ 135:         dyj = y - y0_j
+ 136:         argj = (dxj * dxj) / (2.0 * sx_j * sx_j) + (dyj * dyj) / (2.0 * sy_j * sy_j)
+ 137:         U += float(np.sum(A_j * np.exp(-argj)))
+ 138: 
+ 139:         # walls energy outside [0, 2π]
+ 140:         k_wall = 50000.0
+ 141:         min_v = 0.0
+ 142:         max_v = 2.0 * np.pi
+ 143:         if x < min_v:
+ 144:             U += k_wall * (min_v - x) ** 2
+ 145:         elif x > max_v:
+ 146:             U += k_wall * (x - max_v) ** 2
+ 147:         if y < min_v:
+ 148:             U += k_wall * (min_v - y) ** 2
+ 149:         elif y > max_v:
+ 150:             U += k_wall * (y - max_v) ** 2
+ 151: 
+ 152:         return float(U)
+ 153: 
+ 154:     def potential_force(self, pos):
+ 155:         """FORCE = -∇U"""
+ 156:         x, y = float(pos[0]), float(pos[1])
+ 157:         _, A_i, x0_i, y0_i, sx_i, sy_i, A_j, x0_j, y0_j, sx_j, sy_j = self._multiwell_params()
+ 158: 
+ 159:         Fx = 0.0
+ 160:         Fy = 0.0
+ 161: 
+ 162:         # wells: U = -A exp(-arg) => F = - A exp(-arg) * (dx/sx^2, dy/sy^2)
+ 163:         dx = x - x0_i
+ 164:         dy = y - y0_i
+ 165:         arg = (dx * dx) / (2.0 * sx_i * sx_i) + (dy * dy) / (2.0 * sy_i * sy_i)
+ 166:         e = np.exp(-arg)
+ 167:         Fx += float(-np.sum(A_i * e * dx / (sx_i * sx_i)))
+ 168:         Fy += float(-np.sum(A_i * e * dy / (sy_i * sy_i)))
+ 169: 
+ 170:         # barrier: U = +A exp(-arg) => F = + A exp(-arg) * (dx/sx^2, dy/sy^2)
+ 171:         dxj = x - x0_j
+ 172:         dyj = y - y0_j
+ 173:         argj = (dxj * dxj) / (2.0 * sx_j * sx_j) + (dyj * dyj) / (2.0 * sy_j * sy_j)
+ 174:         ej = np.exp(-argj)
+ 175:         Fx += float(np.sum(A_j * ej * dxj / (sx_j * sx_j)))
+ 176:         Fy += float(np.sum(A_j * ej * dyj / (sy_j * sy_j)))
+ 177: 
+ 178:         # walls force (reduced stiffness for stability)
+ 179:         k_wall = 5000.0
+ 180:         min_v = 0.0
+ 181:         max_v = 2.0 * np.pi
+ 182:         if x < min_v:
+ 183:             Fx += 2.0 * k_wall * (min_v - x)
+ 184:         elif x > max_v:
+ 185:             Fx -= 2.0 * k_wall * (x - max_v)
+ 186:         if y < min_v:
+ 187:             Fy += 2.0 * k_wall * (min_v - y)
+ 188:         elif y > max_v:
+ 189:             Fy -= 2.0 * k_wall * (y - max_v)
+ 190: 
+ 191:         return np.array([Fx, Fy], dtype=float)
+ 192: 
+ 193:     # -----------------------
+ 194:     # Bias terms
+ 195:     # -----------------------
+ 196:     def bias_potential(self, pos, biases):
+ 197:         x, y = float(pos[0]), float(pos[1])
+ 198:         E = 0.0
+ 199:         for (A, x0, y0, sigma) in biases:
+ 200:             if A == 0.0:
+ 201:                 continue
+ 202:             sigma = max(float(sigma), 1e-6)
+ 203:             dx = x - float(x0)
+ 204:             dy = y - float(y0)
+ 205:             E += float(A) * np.exp(-(dx * dx + dy * dy) / (2.0 * sigma * sigma))
+ 206:         return float(E)
+ 207: 
+ 208:     def total_potential(self, pos, biases=None):
+ 209:         if biases is None:
+ 210:             biases = self.all_biases_in_episode
+ 211:         return self.background_potential(pos) + self.bias_potential(pos, biases)
+ 212: 
+ 213:     def bias_force(self, pos, biases, FMAX=200.0):
+ 214:         x, y = float(pos[0]), float(pos[1])
+ 215:         total_force = np.zeros(2, dtype=float)
+ 216: 
+ 217:         for (A, x0, y0, sigma) in biases:
+ 218:             if A == 0.0:
+ 219:                 continue
+ 220:             sigma = max(float(sigma), 1e-6)
+ 221:             dx = x - float(x0)
+ 222:             dy = y - float(y0)
+ 223:             ex = np.exp(-(dx * dx + dy * dy) / (2.0 * sigma * sigma))
+ 224:             B = float(A) * ex
+ 225:             coef = B / (sigma * sigma)
+ 226:             total_force[0] += coef * dx
+ 227:             total_force[1] += coef * dy
+ 228: 
+ 229:         fn = float(np.linalg.norm(total_force))
+ 230:         if fn > FMAX:
+ 231:             total_force *= (FMAX / (fn + 1e-12))
+ 232:         return total_force
+ 233: 
+ 234:     # -----------------------
+ 235:     # Step (XY target objective)
+ 236:     # -----------------------
+ 237:     def step(self, action_index):
+ 238:         action_index = int(action_index)
+ 239: 
+ 240:         # choose action
+ 241:         if action_index < len(self.action_tuples):
+ 242:             amp, width, offset = self.action_tuples[action_index]
+ 243:         else:
+ 244:             amp, width, offset = 0.0, 1.0, 0.0
+ 245: 
+ 246:         # If already in target zone, force amp=0 (optional, keeps hill spam down)
+ 247:         prev_dist = self.dist_to_target
+ 248:         if prev_dist <= float(config.TARGET_RADIUS):
+ 249:             amp = 0.0
+ 250: 
+ 251:         # place hill center "away from target" so repulsion pushes toward target
+ 252:         target = np.array([float(config.TARGET_X), float(config.TARGET_Y)], dtype=float)
+ 253:         vec_away = self.current_position - target
+ 254:         norm = float(np.linalg.norm(vec_away))
+ 255:         if norm < 1e-12:
+ 256:             theta = np.random.uniform(0, 2 * np.pi)
+ 257:             u_away = np.array([np.cos(theta), np.sin(theta)], dtype=float)
+ 258:         else:
+ 259:             u_away = vec_away / norm
+ 260: 
+ 261:         center_xy = self.current_position + float(offset) * u_away
+ 262:         x0, y0 = float(center_xy[0]), float(center_xy[1])
+ 263: 
+ 264:         if float(amp) != 0.0:
+ 265:             self.all_biases_in_episode.append((float(amp), x0, y0, float(width)))
+ 266:         if len(self.all_biases_in_episode) > config.MAX_BIASES:
+ 267:             self.all_biases_in_episode = self.all_biases_in_episode[-config.MAX_BIASES:]
+ 268: 
+ 269:         # propagate overdamped Langevin
+ 270:         n_steps = int(config.SIM_STEPS)
+ 271:         dt = float(config.DT)
+ 272:         temp = float(config.TEMPERATURE)
+ 273:         gamma = float(config.FRICTION)
+ 274: 
+ 275:         D = temp / gamma
+ 276:         sigma_noise = np.sqrt(2.0 * D * dt)
+ 277: 
+ 278:         traj_dist = []
+ 279:         traj_xy = []
+ 280: 
+ 281:         for _ in range(n_steps):
+ 282:             F = self.potential_force(self.current_position) + self.bias_force(self.current_position, self.all_biases_in_episode)
+ 283:             disp = (F / gamma) * dt + np.random.normal(0.0, 1.0, 2) * sigma_noise
+ 284:             self.current_position += disp
+ 285:             self._clip_to_domain()
+ 286: 
+ 287:             d = self._dist_to_target(self.current_position)
+ 288:             traj_dist.append(d)
+ 289:             traj_xy.append(self.current_position.copy())
+ 290: 
+ 291:         self.episode_trajectory_segments.append(traj_dist)
+ 292:         self.episode_xy_segments.append(traj_xy)
+ 293: 
+ 294:         # compute new dist
+ 295:         self.dist_to_target = float(traj_dist[-1])
+ 296: 
+ 297:         # reward: progress to target
+ 298:         new_dist = self.dist_to_target
+ 299:         progress = (prev_dist - new_dist)  # positive if closer
+ 300:         reward = 0.0
+ 301:         reward += float(config.PROGRESS_REWARD) * progress
+ 302:         reward += float(config.STEP_PENALTY)
+ 303:         reward -= float(config.BIAS_PENALTY) * abs(float(amp))
+ 304: 
+ 305:         done = False
+ 306:         if new_dist <= float(config.TARGET_RADIUS):
+ 307:             done = True
+ 308:             reward += 200.0  # terminal bonus (tune if needed)
+ 309: 
+ 310:         return self.get_state(), reward, done, traj_dist
+ 311: 
+ 312:     # -----------------------
+ 313:     # Helpers
+ 314:     # -----------------------
+ 315:     def _dist_to_target(self, pos):
+ 316:         dx = float(pos[0]) - float(config.TARGET_X)
+ 317:         dy = float(pos[1]) - float(config.TARGET_Y)
+ 318:         return float(np.sqrt(dx * dx + dy * dy))
+ 319: 
+ 320:     def _clip_to_domain(self):
+ 321:         min_v = 0.0
+ 322:         max_v = 2.0 * np.pi
+ 323:         self.current_position[0] = float(np.clip(self.current_position[0], min_v, max_v))
+ 324:         self.current_position[1] = float(np.clip(self.current_position[1], min_v, max_v))
