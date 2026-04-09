@@ -28,7 +28,7 @@ Key capabilities:
 ### Gap Analysis
 In this project, a "gap" means a sparsely sampled or underrepresented region in CV1/CV2 space relative to the rest of the trajectory data. Gaps usually appear as low-count or low-probability bins in the 2D density, or as high-FES regions that were rarely visited. These gaps flag regions where the policy has limited coverage, where barriers may exist, or where transition pathways are under-resolved.
 
-<center><img src="results_PPO/full_trajectories/progressive_traj_ep_0002_cv1_cv2_2d.png" width="50%" height="50%"> </center>
+<center><img src="comparison_outputs/ppo_biased/best_two_paths.png" width="50%" height="50%"> </center>
 
 #### Density Approach (CV Density / FES Gaps)
 **Logic**: build a 2D histogram over CV1/CV2, convert to probability, and optionally to FES; then mark bins that fall below a count/probability threshold or above an FES threshold.  
