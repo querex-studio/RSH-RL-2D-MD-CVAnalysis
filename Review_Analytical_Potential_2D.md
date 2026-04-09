@@ -3,6 +3,72 @@
 **1. Project Overview**
 This project implements a toy 2D analytical potential and trains a PPO agent to place Gaussian bias hills that push a particle toward a target. The environment propagates overdamped Langevin dynamics over a bounded domain [0, 2*pi] x [0, 2*pi]. The agent chooses discrete actions (amplitude, width, offset) from bins and receives a reward based primarily on distance-to-target progress.
 
+**1.1 What This Project Is and Is Not**
+This project does not use a full molecular dynamics (MD) engine such as OpenMM, GROMACS, NAMD, or LAMMPS. There is no atomistic force field, no explicit masses or velocities, no thermostat/barostat implementation, and no multi-particle integration loop. Instead, the code defines an analytical 2D potential energy surface and evolves a single particle directly in that reduced coordinate space.
+
+The most accurate description is:
+- not full MD,
+- but a toy analytical particle simulation with MD-like stochastic dynamics,
+- specifically an overdamped Langevin process integrated with the Euler-Maruyama scheme.
+
+This distinction matters scientifically. The project borrows MD-style language such as "force", "temperature", "friction", "SIM_STEPS", and "bias hills", but the underlying simulator is a reduced stochastic dynamics model rather than an atomistic MD workflow.
+
+**1.2 MD-Like Stochastic Dynamics**
+The environment is "MD-like" because it propagates a particle under forces derived from a potential and adds thermal noise at each micro-step. In that limited sense, it resembles coarse-grained or reduced-coordinate dynamics used in molecular simulation. However, it is still much simpler than standard MD because the state is just a 2D position and the dynamics are defined directly in that reduced space.
+
+At each micro-step, the code computes the total force as the sum of the background potential force and the adaptive bias force:
+
+$$
+\mathbf{F}(\mathbf{x}) = \mathbf{F}_{\mathrm{bg}}(\mathbf{x}) + \mathbf{F}_{\mathrm{bias}}(\mathbf{x}),
+$$
+
+with force defined in the usual way from a potential:
+
+$$
+\mathbf{F}(\mathbf{x}) = - \nabla U(\mathbf{x}).
+$$
+
+The presence of deterministic drift plus random thermal noise is why this should be described as stochastic dynamics rather than purely deterministic optimization.
+
+**1.3 Overdamped Langevin Dynamics**
+The simulator uses the overdamped Langevin equation, which is the high-friction limit of Langevin dynamics. In this regime, inertia is neglected, so the system does not evolve velocities explicitly. Position changes are driven by force, friction, and random noise:
+
+$$
+d\mathbf{x}_t = \frac{\mathbf{F}(\mathbf{x}_t)}{\gamma} \, dt + \sqrt{2D} \, d\mathbf{W}_t,
+$$
+
+where:
+- $\mathbf{x}_t$ is the 2D position,
+- $\mathbf{F}(\mathbf{x}_t)$ is the total force,
+- $\gamma$ is the friction coefficient,
+- $D$ is the diffusion coefficient,
+- $\mathbf{W}_t$ is a Wiener process.
+
+Using the Einstein relation assumed by the code,
+
+$$
+D = \frac{T}{\gamma},
+$$
+
+where $T$ is the reduced temperature parameter used to set the noise scale.
+
+This is why there are no velocity Verlet steps, no momentum variables, and no masses in the environment: it is an overdamped stochastic process, not Newtonian MD.
+
+**1.4 Euler-Maruyama Discretization**
+The continuous stochastic differential equation is integrated numerically with the Euler-Maruyama method. For timestep $\Delta t$, the update used by the environment is:
+
+$$
+\mathbf{x}_{n+1} = \mathbf{x}_n + \frac{\mathbf{F}(\mathbf{x}_n)}{\gamma} \Delta t + \sqrt{2D\Delta t} \, \boldsymbol{\eta}_n,
+$$
+
+where
+
+$$
+\boldsymbol{\eta}_n \sim \mathcal{N}(\mathbf{0}, \mathbf{I}).
+$$
+
+This is the stochastic analogue of forward Euler integration. It is simple and standard for overdamped Langevin systems, but its stability and accuracy depend strongly on the timestep, force magnitude, and boundary handling. In this project, those numerical details matter because large wall forces, force clipping, and hard position clipping can distort the intended dynamics.
+
 **2. Architecture and Design Review**
 The code is split into an RL agent (`agent.py`), an environment (`env_gaussian_2d.py`), a training harness (`train_gaussian.py`), and a configuration module (`config_gaussian.py`). This separation is structurally sound, but several design decisions reduce scientific clarity and reproducibility:
 - The configuration file defines many parameters and even a two-phase reward scheme that are not actually used by the environment. This breaks the contract between configuration, documentation, and implementation, and increases the risk of silent misuse.

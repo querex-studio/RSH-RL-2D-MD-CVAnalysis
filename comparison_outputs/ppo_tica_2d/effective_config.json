@@ -1,0 +1,15 @@
+{
+  "seed": 42,
+  "model": "ppo_tica_2d",
+  "controller": "PPO",
+  "encoder": "TICA",
+  "bias_enabled": true,
+  "budget_env_steps": 40000,
+  "warmup_env_steps": 11520,
+  "train_env_steps": 28480,
+  "approx_episodes_or_rounds": 71,
+  "max_actions_per_episode": 40,
+  "eval_every": 20,
+  "eval_episodes": 8,
+  "lag_or_alpha": "lag=5, comps=4"
+}

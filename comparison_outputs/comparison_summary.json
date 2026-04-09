@@ -1,0 +1,26 @@
+[
+  {
+    "model": "ppo_biased",
+    "success_rate": 0.13,
+    "best_final_distance": 0.02311843864437354,
+    "n_successes": 13
+  },
+  {
+    "model": "adaptive_cvgen_like_2d",
+    "success_rate": 0.04,
+    "best_final_distance": 0.019241596725958782,
+    "n_successes": 2
+  },
+  {
+    "model": "ppo_tica_2d",
+    "success_rate": 0.14084507042253522,
+    "best_final_distance": 0.05756029550123656,
+    "n_successes": 10
+  },
+  {
+    "model": "ppo_vampnet_2d",
+    "success_rate": 0.16901408450704225,
+    "best_final_distance": 0.06583178350378535,
+    "n_successes": 12
+  }
+]

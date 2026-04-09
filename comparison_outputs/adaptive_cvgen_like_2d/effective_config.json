@@ -1,0 +1,15 @@
+{
+  "seed": 42,
+  "model": "adaptive_cvgen_like_2d",
+  "controller": "Adaptive-CVgen-like",
+  "encoder": "TICA clustering",
+  "bias_enabled": false,
+  "budget_env_steps": 40000,
+  "warmup_env_steps": 0,
+  "train_env_steps": 40000,
+  "approx_episodes_or_rounds": 50,
+  "max_actions_per_episode": 10,
+  "eval_every": "-",
+  "eval_episodes": "-",
+  "lag_or_alpha": "tica_lag=5, alpha_candidates=[0.0, 0.1, 0.25, 0.5, 1.0, 1.5]"
+}

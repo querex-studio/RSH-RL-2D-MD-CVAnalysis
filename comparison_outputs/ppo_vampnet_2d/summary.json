@@ -1,0 +1,49 @@
+{
+  "model": "ppo_vampnet_2d",
+  "success_rate": 0.16901408450704225,
+  "best_final_distance": 0.06583178350378535,
+  "n_successes": 12,
+  "top_paths": [
+    {
+      "label": "Train success 1",
+      "score": 320.5781992592745,
+      "source": "train",
+      "n_points": 390
+    },
+    {
+      "label": "Eval success 3",
+      "score": 728.3130403411831,
+      "source": "eval",
+      "n_points": 317
+    }
+  ],
+  "top_train_paths": [
+    {
+      "label": "Train success 1",
+      "score": 320.5781992592745,
+      "source": "train",
+      "n_points": 390
+    },
+    {
+      "label": "Train success 2",
+      "score": 238.00644891399824,
+      "source": "train",
+      "n_points": 165
+    }
+  ],
+  "top_eval_paths": [
+    {
+      "label": "Eval success 3",
+      "score": 728.3130403411831,
+      "source": "eval",
+      "n_points": 317
+    },
+    {
+      "label": "Eval success 1",
+      "score": 324.21605013648787,
+      "source": "eval",
+      "n_points": 381
+    }
+  ],
+  "encoder_warmup_steps": 11520
+}

@@ -1,0 +1,15 @@
+{
+  "seed": 42,
+  "model": "ppo_biased",
+  "controller": "PPO",
+  "encoder": "identity",
+  "bias_enabled": true,
+  "budget_env_steps": 40000,
+  "warmup_env_steps": 0,
+  "train_env_steps": 40000,
+  "approx_episodes_or_rounds": 100,
+  "max_actions_per_episode": 40,
+  "eval_every": 20,
+  "eval_episodes": 8,
+  "lag_or_alpha": "-"
+}

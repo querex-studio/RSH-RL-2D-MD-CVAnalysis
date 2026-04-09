@@ -1,0 +1,36 @@
+{
+  "model": "ppo_tica_2d",
+  "success_rate": 0.14084507042253522,
+  "best_final_distance": 0.05756029550123656,
+  "n_successes": 10,
+  "top_paths": [
+    {
+      "label": "Train success 1",
+      "score": 425.5483494545048,
+      "source": "train",
+      "n_points": 338
+    },
+    {
+      "label": "Train success 9",
+      "score": 238.41999761532318,
+      "source": "train",
+      "n_points": 142
+    }
+  ],
+  "top_train_paths": [
+    {
+      "label": "Train success 1",
+      "score": 425.5483494545048,
+      "source": "train",
+      "n_points": 338
+    },
+    {
+      "label": "Train success 9",
+      "score": 238.41999761532318,
+      "source": "train",
+      "n_points": 142
+    }
+  ],
+  "top_eval_paths": [],
+  "encoder_warmup_steps": 11520
+}

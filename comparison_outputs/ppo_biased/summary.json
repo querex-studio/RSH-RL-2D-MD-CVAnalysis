@@ -1,0 +1,48 @@
+{
+  "model": "ppo_biased",
+  "success_rate": 0.13,
+  "best_final_distance": 0.02311843864437354,
+  "n_successes": 13,
+  "top_paths": [
+    {
+      "label": "Train success 1",
+      "score": 430.247278312268,
+      "source": "train",
+      "n_points": 278
+    },
+    {
+      "label": "Eval success 4",
+      "score": 730.7019919806922,
+      "source": "eval",
+      "n_points": 264
+    }
+  ],
+  "top_train_paths": [
+    {
+      "label": "Train success 1",
+      "score": 430.247278312268,
+      "source": "train",
+      "n_points": 278
+    },
+    {
+      "label": "Train success 9",
+      "score": 233.769376429431,
+      "source": "train",
+      "n_points": 189
+    }
+  ],
+  "top_eval_paths": [
+    {
+      "label": "Eval success 4",
+      "score": 730.7019919806922,
+      "source": "eval",
+      "n_points": 264
+    },
+    {
+      "label": "Eval success 1",
+      "score": 331.804190256958,
+      "source": "eval",
+      "n_points": 225
+    }
+  ]
+}

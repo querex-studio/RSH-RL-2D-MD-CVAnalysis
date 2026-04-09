@@ -1,0 +1,35 @@
+{
+  "model": "adaptive_cvgen_like_2d",
+  "success_rate": 0.04,
+  "best_final_distance": 0.019241596725958782,
+  "n_successes": 2,
+  "top_paths": [
+    {
+      "label": "Adaptive success 1",
+      "score": 2.6497838497161865,
+      "source": "train",
+      "n_points": 296
+    },
+    {
+      "label": "Adaptive success 2",
+      "score": 2.648162841796875,
+      "source": "train",
+      "n_points": 302
+    }
+  ],
+  "top_train_paths": [
+    {
+      "label": "Adaptive success 1",
+      "score": 2.6497838497161865,
+      "source": "train",
+      "n_points": 296
+    },
+    {
+      "label": "Adaptive success 2",
+      "score": 2.648162841796875,
+      "source": "train",
+      "n_points": 302
+    }
+  ],
+  "top_eval_paths": []
+}
